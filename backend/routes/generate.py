@@ -32,6 +32,7 @@ class GenerateRequest(BaseModel):
     is_composite: bool = False
     canvas_width: int | None = None
     canvas_height: int | None = None
+    batch_count: int = 1
 
 
 # ── SSE endpoint ───────────────────────────────────────────────────────
@@ -99,6 +100,8 @@ async def generate(request: Request, body: GenerateRequest):
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
+        batch_count = max(1, body.batch_count)
+
         loop.run_in_executor(
             _executor,
             _run_img2img,
@@ -112,6 +115,7 @@ async def generate(request: Request, body: GenerateRequest):
             progress_queue,
             cancel_event,
             loop,
+            batch_count,
         )
     else:
         prompt = params.get("prompt", "")
@@ -120,6 +124,8 @@ async def generate(request: Request, body: GenerateRequest):
         seed = params.get("seed", None)
         width = params.get("width", 1024)
         height = params.get("height", 1024)
+
+        batch_count = max(1, body.batch_count)
 
         loop.run_in_executor(
             _executor,
@@ -134,6 +140,7 @@ async def generate(request: Request, body: GenerateRequest):
             progress_queue,
             cancel_event,
             loop,
+            batch_count,
         )
 
     # ── 5. Return SSE stream ───────────────────────────────────────────
@@ -158,13 +165,17 @@ def _run_text_to_image(
     queue: asyncio.Queue,
     cancel_event: asyncio.Event,
     loop: asyncio.AbstractEventLoop,
+    batch_count: int = 1,
 ) -> None:
-    """Run t2i in a thread pool, pushing progress to the async queue."""
-    # Helper to push an SSE-serialisable dict
+    """Run t2i in a thread pool, pushing progress to the async queue.
+
+    When batch_count > 1, generates that many images sequentially,
+    emitting batchIndex/batchTotal in progress and done events.
+    """
     def _push(data: dict) -> None:
         asyncio.run_coroutine_threadsafe(queue.put(data), loop)
 
-    # Phase 1: ensure pipeline loaded
+    # Phase 1: ensure pipeline loaded (once for entire batch)
     if not pipeline.loaded:
         _push({"event": "progress", "status": "loading", "phase": "downloading"})
         pipeline.load(progress_callback=lambda p: _push({
@@ -174,48 +185,67 @@ def _run_text_to_image(
         }))
         _push({"event": "progress", "status": "loading", "phase": "ready"})
 
-    # Phase 2: generation
-    _push({"event": "progress", "status": "generating", "step": 0, "total": steps})
-
-    def step_cb(current: int, total: int, image_b64: str | None = None) -> None:
+    # Phase 2: generation loop
+    for batch_idx in range(batch_count):
         if cancel_event.is_set():
-            return
-        payload: dict = {
+            break
+
+        _push({
             "event": "progress",
             "status": "generating",
-            "step": current + 1,  # diffusers delivers 0-indexed; make 1-indexed
-            "total": total,
-        }
-        if image_b64 is not None:
-            payload["image_b64"] = image_b64
-        asyncio.run_coroutine_threadsafe(queue.put(payload), loop)
+            "step": 0,
+            "total": steps,
+            "batchIndex": batch_idx,
+            "batchTotal": batch_count,
+        })
 
-    try:
-        png_bytes = pipeline.generate(
-            prompt=prompt,
-            steps=steps,
-            cfg_scale=cfg_scale,
-            seed=seed,
-            width=width,
-            height=height,
-            step_callback=step_cb,
-        )
-    except Exception as exc:
-        logger.exception("Generation failed")
-        _push({"event": "error", "status": "error", "message": str(exc)})
-        return
+        def step_cb(
+            current: int, total: int, image_b64: str | None = None,
+            _batch_idx: int = batch_idx,
+        ) -> None:
+            if cancel_event.is_set():
+                return
+            payload: dict = {
+                "event": "progress",
+                "status": "generating",
+                "step": current + 1,
+                "total": total,
+                "batchIndex": _batch_idx,
+                "batchTotal": batch_count,
+            }
+            if image_b64 is not None:
+                payload["image_b64"] = image_b64
+            asyncio.run_coroutine_threadsafe(queue.put(payload), loop)
 
-    # Phase 3: persist
-    _push({"event": "progress", "status": "saving"})
-    actual_seed = seed if seed is not None else 0
-    path = save_image(png_bytes, prompt=prompt, seed=actual_seed)
+        try:
+            png_bytes = pipeline.generate(
+                prompt=prompt,
+                steps=steps,
+                cfg_scale=cfg_scale,
+                seed=seed,
+                width=width,
+                height=height,
+                step_callback=step_cb,
+            )
+        except Exception as exc:
+            logger.exception("Generation failed")
+            _push({"event": "error", "status": "error", "message": str(exc)})
+            return
 
-    _push({
-        "event": "done",
-        "status": "complete",
-        "image_url": f"/images/{path.name}",
-        "seed": actual_seed,
-    })
+        # Phase 3: persist
+        _push({"event": "progress", "status": "saving"})
+        actual_seed = seed if seed is not None else 0
+        path = save_image(png_bytes, prompt=prompt, seed=actual_seed)
+
+        _push({
+            "event": "done",
+            "status": "complete",
+            "image_url": f"/images/{path.name}",
+            "seed": actual_seed,
+            "batchIndex": batch_idx,
+            "batchTotal": batch_count,
+            "batchComplete": batch_idx == batch_count - 1,
+        })
 
 
 def _run_img2img(
@@ -229,12 +259,16 @@ def _run_img2img(
     queue: asyncio.Queue,
     cancel_event: asyncio.Event,
     loop: asyncio.AbstractEventLoop,
+    batch_count: int = 1,
 ) -> None:
-    """Run i2i in a thread pool, pushing progress to the async queue."""
+    """Run i2i in a thread pool, pushing progress to the async queue.
+
+    When batch_count > 1, generates that many images sequentially.
+    """
     def _push(data: dict) -> None:
         asyncio.run_coroutine_threadsafe(queue.put(data), loop)
 
-    # Phase 1: ensure both pipelines loaded
+    # Phase 1: ensure both pipelines loaded (once for entire batch)
     if not pipeline.loaded:
         _push({"event": "progress", "status": "loading", "phase": "downloading"})
         pipeline.load(progress_callback=lambda p: _push({
@@ -248,47 +282,70 @@ def _run_img2img(
 
     import base64
     # Strip data URL prefix if present (frontend sends data:image/...;base64,...)
-    if "," in init_image_b64:
-        init_image_b64 = init_image_b64.split(",", 1)[1]
-    init_bytes = base64.b64decode(init_image_b64)
+    clean_b64 = init_image_b64
+    if "," in clean_b64:
+        clean_b64 = clean_b64.split(",", 1)[1]
+    init_bytes = base64.b64decode(clean_b64)
 
-    def step_cb(current: int, total: int, image_b64: str | None = None) -> None:
+    # Phase 2: generation loop
+    for batch_idx in range(batch_count):
         if cancel_event.is_set():
-            return
-        payload: dict = {
+            break
+
+        _push({
             "event": "progress",
             "status": "generating",
-            "step": current + 1,  # diffusers delivers 0-indexed; make 1-indexed
-            "total": total,
-        }
-        if image_b64 is not None:
-            payload["image_b64"] = image_b64
-        asyncio.run_coroutine_threadsafe(queue.put(payload), loop)
+            "step": 0,
+            "total": steps,
+            "batchIndex": batch_idx,
+            "batchTotal": batch_count,
+        })
 
-    try:
-        png_bytes = pipeline.generate_img2img(
-            prompt=prompt,
-            init_image_bytes=init_bytes,
-            strength=strength,
-            steps=steps,
-            cfg_scale=cfg_scale,
-            seed=seed,
-            step_callback=step_cb,
-        )
-    except Exception as exc:
-        logger.exception("Img2img generation failed")
-        _push({"event": "error", "status": "error", "message": str(exc)})
-        return
+        def step_cb(
+            current: int, total: int, image_b64: str | None = None,
+            _batch_idx: int = batch_idx,
+        ) -> None:
+            if cancel_event.is_set():
+                return
+            payload: dict = {
+                "event": "progress",
+                "status": "generating",
+                "step": current + 1,
+                "total": total,
+                "batchIndex": _batch_idx,
+                "batchTotal": batch_count,
+            }
+            if image_b64 is not None:
+                payload["image_b64"] = image_b64
+            asyncio.run_coroutine_threadsafe(queue.put(payload), loop)
 
-    actual_seed = seed if seed is not None else 0
-    path = save_image(png_bytes, prompt=prompt, seed=actual_seed)
+        try:
+            png_bytes = pipeline.generate_img2img(
+                prompt=prompt,
+                init_image_bytes=init_bytes,
+                strength=strength,
+                steps=steps,
+                cfg_scale=cfg_scale,
+                seed=seed,
+                step_callback=step_cb,
+            )
+        except Exception as exc:
+            logger.exception("Img2img generation failed")
+            _push({"event": "error", "status": "error", "message": str(exc)})
+            return
 
-    _push({
-        "event": "done",
-        "status": "complete",
-        "image_url": f"/images/{path.name}",
-        "seed": actual_seed,
-    })
+        actual_seed = seed if seed is not None else 0
+        path = save_image(png_bytes, prompt=prompt, seed=actual_seed)
+
+        _push({
+            "event": "done",
+            "status": "complete",
+            "image_url": f"/images/{path.name}",
+            "seed": actual_seed,
+            "batchIndex": batch_idx,
+            "batchTotal": batch_count,
+            "batchComplete": batch_idx == batch_count - 1,
+        })
 
 
 # ── composite runner ──────────────────────────────────────────────────
@@ -416,8 +473,13 @@ async def _sse_generator(
             payload = json.dumps(data)
             yield f"event: {event_type}\ndata: {payload}\n\n"
 
-            if event_type in ("done", "error"):
+            if event_type == "error":
                 break
+            if event_type == "done":
+                # In batch mode, keep streaming until the last done event
+                batch_complete = data.get("batchComplete")
+                if batch_complete is not False:
+                    break
     except asyncio.CancelledError:
         cancel_event.set()
         raise

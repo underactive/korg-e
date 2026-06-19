@@ -30,6 +30,11 @@ export type KorgNodeData = {
   seed?: number | null;
   width?: number;
   height?: number;
+  batchCount?: number;
+  // Batch runtime state
+  batchIndex?: number;
+  batchTotal?: number;
+  batchImages?: Array<{ imageUrl: string; seed: number }>;
   // ImageOutputNode
   imageUrl?: string | null;
   seedInfo?: number;
@@ -72,6 +77,8 @@ export type SSEProgressEvent = {
   total?: number;
   phase?: string;
   image_b64?: string;  // base64-encoded JPEG preview (no data URL prefix)
+  batchIndex?: number; // 0-based current batch image index
+  batchTotal?: number; // total number of images in batch
 };
 
 export type SSEDoneEvent = {
@@ -85,6 +92,9 @@ export type SSEDoneEvent = {
     image_url: string;
     seed: number;
   }>;
+  batchIndex?: number;           // which batch image just completed
+  batchTotal?: number;           // total images in batch
+  batchComplete?: boolean;       // true on the very last done event
 };
 
 export type SSEErrorEvent = {

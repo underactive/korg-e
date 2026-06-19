@@ -41,9 +41,11 @@ export function useWorkflowIntegration() {
     };
 
     const handleGenerate = (e: Event) => {
-      const { nodeId } = (e as CustomEvent).detail as {
+      const { nodeId, params: nodeParams } = (e as CustomEvent).detail as {
         nodeId: string;
+        params?: { batchCount?: number };
       };
+      const batchCount = nodeParams?.batchCount ?? 1;
 
       // Read latest graph state from refs (avoids stale closure)
       const currentNodes = nodesRef.current;
@@ -56,7 +58,7 @@ export function useWorkflowIntegration() {
 
       // Abort any previous generation
       sseRef.current?.abort();
-      updater(nodeId, { status: "loading", progress: 0 });
+      updater(nodeId, { status: "loading", progress: 0, batchIndex: 0, batchTotal: batchCount });
 
       if (isComposite) {
         // ── Composite dispatch ────────────────────────────────────────
@@ -178,7 +180,11 @@ export function useWorkflowIntegration() {
         is_img2img: currentNodes.some(
           (n) => n.type === "imageUpload" && n.data.imageData
         ),
+        batch_count: batchCount,
       };
+
+      // Accumulate images for batch mode
+      const batchImages: Array<{ imageUrl: string; seed: number }> = [];
 
       sseRef.current = createSSEConnection(body, {
         onProgress: (data) => {
@@ -187,10 +193,15 @@ export function useWorkflowIntegration() {
             updater(nodeId, { status: "loading" });
           } else if (status === "generating") {
             const step = (data.step as number) ?? 0;
-            updater(nodeId, {
+            const batchIdx = data.batchIndex as number | undefined;
+            const batchTot = data.batchTotal as number | undefined;
+            const update: Record<string, unknown> = {
               status: "generating",
               progress: step,
-            });
+            };
+            if (batchIdx !== undefined) update.batchIndex = batchIdx;
+            if (batchTot !== undefined) update.batchTotal = batchTot;
+            updater(nodeId, update);
 
             // Forward intermediate preview to connected ImageOutputNode
             const imageB64 = data.image_b64 as string | undefined;
@@ -211,14 +222,14 @@ export function useWorkflowIntegration() {
         onDone: (data) => {
           const imageUrl = data.image_url as string;
           const seed = data.seed as number;
-          updater(nodeId, {
-            status: "complete",
-            imageUrl,
-            seedInfo: seed,
-            progress: 0,
-          });
+          const batchComplete = data.batchComplete as boolean | undefined;
+          const batchIdx = data.batchIndex as number | undefined;
+          const batchTot = data.batchTotal as number | undefined;
 
-          // Also update the ImageOutput node if connected
+          // Track batch images
+          batchImages.push({ imageUrl, seed });
+
+          // Always forward latest image to the connected ImageOutput node
           const outputEdge = currentEdges.find(
             (e) => e.source === nodeId && e.sourceHandle === "image"
           );
@@ -226,6 +237,39 @@ export function useWorkflowIntegration() {
             updater(outputEdge.target, {
               imageUrl,
               seedInfo: seed,
+            });
+          }
+
+          // In batch mode: only finalize when all images are done
+          if (batchComplete) {
+            // If multiple images, show last image; store all on the node
+            const update: Record<string, unknown> = {
+              status: "complete",
+              imageUrl,
+              seedInfo: seed,
+              progress: 0,
+            };
+            if (batchImages.length > 1) {
+              // Store the last batch image as primary, keep count
+              update.batchImages = batchImages;
+            }
+            updater(nodeId, update);
+          } else if (batchTot && batchTot > 1) {
+            // Still generating batch — keep status as generating
+            // but update the image URL to show latest completed
+            const update: Record<string, unknown> = {
+              imageUrl,
+              seedInfo: seed,
+            };
+            if (batchIdx !== undefined) update.batchIndex = batchIdx + 1;
+            updater(nodeId, update);
+          } else {
+            // Single image (no batch)
+            updater(nodeId, {
+              status: "complete",
+              imageUrl,
+              seedInfo: seed,
+              progress: 0,
             });
           }
         },

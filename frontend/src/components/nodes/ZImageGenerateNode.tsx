@@ -20,8 +20,11 @@ export default function ZImageGenerateNode({
   const seed = data.seed ?? null;
   const width = data.width ?? 1024;
   const height = data.height ?? 1024;
+  const batchCount = data.batchCount ?? 1;
   const status = data.status ?? "idle";
   const progress = data.progress ?? 0;
+  const batchIndex = data.batchIndex ?? 0;
+  const batchTotal = data.batchTotal ?? 0;
 
   const isBusy = status === "loading" || status === "generating";
 
@@ -29,15 +32,18 @@ export default function ZImageGenerateNode({
     const workflowEvent = new CustomEvent("korg:generate", {
       detail: {
         nodeId: id,
-        params: { steps, cfgScale, strength, seed, width, height },
+        params: { steps, cfgScale, strength, seed, width, height, batchCount },
       },
     });
     window.dispatchEvent(workflowEvent);
-  }, [id, steps, cfgScale, strength, seed, width, height]);
+  }, [id, steps, cfgScale, strength, seed, width, height, batchCount]);
 
+  const isBatch = batchTotal > 1;
   const progressPct =
-    status === "generating"
-      ? Math.round((progress / steps) * 100)
+    status === "generating" ? Math.round((progress / steps) * 100) : 0;
+  const batchPct =
+    isBatch && batchTotal > 0
+      ? Math.round(((batchIndex + (status === "generating" ? progress / steps : 0)) / batchTotal) * 100)
       : 0;
 
   return (
@@ -46,6 +52,22 @@ export default function ZImageGenerateNode({
       <div className="korg-node__body">
         {/* Parameters */}
         <div className="korg-node__params">
+          <label>
+            Batch
+            <input
+              type="number"
+              className="nodrag"
+              value={batchCount}
+              min={1}
+              max={100}
+              onChange={(e) =>
+                updateNodeData(id, {
+                  batchCount: Math.max(1, parseInt(e.target.value, 10) || 1),
+                })
+              }
+              style={{ width: 60 }}
+            />
+          </label>
           <label>
             Steps
             <input
@@ -155,26 +177,64 @@ export default function ZImageGenerateNode({
           {isBusy ? "Generating…" : "Generate"}
         </button>
 
-        {/* Progress bar */}
+        {/* Progress bars */}
         {status === "generating" && (
-          <div
-            className="korg-node__progress"
-            style={{
-              marginTop: 8,
-              height: 8,
-              background: "#333",
-              borderRadius: 4,
-              overflow: "hidden",
-            }}
-          >
+          <div style={{ marginTop: 8 }}>
+            {/* Per-image step progress */}
             <div
+              className="korg-node__progress"
               style={{
-                width: `${progressPct}%`,
-                height: "100%",
-                background: "#4a90d9",
-                transition: "width 0.3s ease",
+                height: 8,
+                background: "#333",
+                borderRadius: 4,
+                overflow: "hidden",
               }}
-            />
+            >
+              <div
+                style={{
+                  width: `${progressPct}%`,
+                  height: "100%",
+                  background: "#4a90d9",
+                  transition: "width 0.3s ease",
+                }}
+              />
+            </div>
+            {isBatch && (
+              <div style={{ marginTop: 4 }}>
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: "#aaa",
+                    marginBottom: 2,
+                    display: "flex",
+                    justifyContent: "space-between",
+                  }}
+                >
+                  <span>Batch</span>
+                  <span>
+                    {batchIndex + 1} / {batchTotal}
+                  </span>
+                </div>
+                <div
+                  className="korg-node__progress"
+                  style={{
+                    height: 8,
+                    background: "#333",
+                    borderRadius: 4,
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${batchPct}%`,
+                      height: "100%",
+                      background: "#e6a23c",
+                      transition: "width 0.3s ease",
+                    }}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         )}
 

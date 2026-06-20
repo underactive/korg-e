@@ -217,12 +217,16 @@ def _run_text_to_image(
                 payload["image_b64"] = image_b64
             asyncio.run_coroutine_threadsafe(queue.put(payload), loop)
 
+        # Advance the seed per image so a batch is reproducible variations
+        # rather than identical (fixed seed) or order-dependent (None → global RNG).
+        per_seed = seed + batch_idx if seed is not None else None
+
         try:
             png_bytes = pipeline.generate(
                 prompt=prompt,
                 steps=steps,
                 cfg_scale=cfg_scale,
-                seed=seed,
+                seed=per_seed,
                 width=width,
                 height=height,
                 step_callback=step_cb,
@@ -234,7 +238,7 @@ def _run_text_to_image(
 
         # Phase 3: persist
         _push({"event": "progress", "status": "saving"})
-        actual_seed = seed if seed is not None else 0
+        actual_seed = per_seed if per_seed is not None else 0
         path = save_image(png_bytes, prompt=prompt, seed=actual_seed)
 
         _push({
@@ -246,6 +250,11 @@ def _run_text_to_image(
             "batchTotal": batch_count,
             "batchComplete": batch_idx == batch_count - 1,
         })
+
+        # Release cached GPU memory before the next image so it can't
+        # accumulate across the batch (slowdown + numerical degradation).
+        del png_bytes
+        pipeline.empty_cache()
 
 
 def _run_img2img(
@@ -319,6 +328,10 @@ def _run_img2img(
                 payload["image_b64"] = image_b64
             asyncio.run_coroutine_threadsafe(queue.put(payload), loop)
 
+        # Advance the seed per image so a batch is reproducible variations
+        # rather than identical (fixed seed) or order-dependent (None → global RNG).
+        per_seed = seed + batch_idx if seed is not None else None
+
         try:
             png_bytes = pipeline.generate_img2img(
                 prompt=prompt,
@@ -326,7 +339,7 @@ def _run_img2img(
                 strength=strength,
                 steps=steps,
                 cfg_scale=cfg_scale,
-                seed=seed,
+                seed=per_seed,
                 step_callback=step_cb,
             )
         except Exception as exc:
@@ -334,7 +347,7 @@ def _run_img2img(
             _push({"event": "error", "status": "error", "message": str(exc)})
             return
 
-        actual_seed = seed if seed is not None else 0
+        actual_seed = per_seed if per_seed is not None else 0
         path = save_image(png_bytes, prompt=prompt, seed=actual_seed)
 
         _push({
@@ -346,6 +359,11 @@ def _run_img2img(
             "batchTotal": batch_count,
             "batchComplete": batch_idx == batch_count - 1,
         })
+
+        # Release cached GPU memory before the next image so it can't
+        # accumulate across the batch (slowdown + numerical degradation).
+        del png_bytes
+        pipeline.empty_cache()
 
 
 # ── composite runner ──────────────────────────────────────────────────

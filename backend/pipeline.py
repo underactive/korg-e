@@ -453,6 +453,26 @@ class PipelineWrapper:
         """Return per-region PNG bytes from the last composite generation."""
         return getattr(self, "_region_pngs", [])
 
+    # ── memory management ───────────────────────────────────────────────
+
+    def empty_cache(self) -> None:
+        """Release cached GPU memory held by the framework allocator.
+
+        Call between sequential generations (e.g. each image of a batch) to
+        stop memory from accumulating across runs. On MPS the caching
+        allocator otherwise retains freed buffers, which drives both the
+        progressive slowdown and the numerical degradation (broken anatomy)
+        seen on long batches. Cheap to call — a few ms of re-allocation on the
+        next run in exchange for a clean memory baseline.
+        """
+        import gc
+
+        gc.collect()
+        if settings.device == "mps":
+            torch.mps.empty_cache()
+        elif settings.device == "cuda":
+            torch.cuda.empty_cache()
+
 
 # ── helpers ─────────────────────────────────────────────────────────────
 

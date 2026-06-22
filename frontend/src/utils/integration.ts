@@ -180,6 +180,9 @@ export function useWorkflowIntegration() {
         is_img2img: currentNodes.some(
           (n) => n.type === "imageUpload" && n.data.imageData
         ),
+        is_inpaint: currentNodes.some(
+          (n) => n.type === "zImageGenerate" && n.data.maskData
+        ),
         batch_count: batchCount,
       };
 

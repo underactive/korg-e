@@ -131,6 +131,61 @@ def delete_image(filename: str) -> bool:
     return True
 
 
+def save_inpaint_images(
+    inpainted_bytes: bytes,
+    init_image_bytes: bytes,
+    mask_image_bytes: bytes,
+    prompt: str,
+    seed: int,
+    mask_blur: int = 16,
+    timestamp: str | None = None,
+) -> dict:
+    """Save inpainted result + init + mask images and return URL paths.
+
+    Returns a dict with ``image_url``, ``init_image_url``, ``mask_url``.
+    """
+    ts = timestamp or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    base = f"{ts}_{seed}"
+
+    # Save inpainted result
+    result_filename = f"{base}.png"
+    result_path = _ensure_output_dir() / result_filename
+    with open(result_path, "wb") as f:
+        f.write(inpainted_bytes)
+
+    # Save init image (provenance)
+    init_filename = f"{base}_init.png"
+    init_path = _ensure_output_dir() / init_filename
+    with open(init_path, "wb") as f:
+        f.write(init_image_bytes)
+
+    # Save mask image (provenance)
+    mask_filename = f"{base}_mask.png"
+    mask_path = _ensure_output_dir() / mask_filename
+    with open(mask_path, "wb") as f:
+        f.write(mask_image_bytes)
+
+    # Write enriched metadata
+    meta = {
+        "filename": result_filename,
+        "prompt": prompt,
+        "seed": seed,
+        "timestamp": ts,
+        "type": "inpaint",
+        "init_image_filename": init_filename,
+        "mask_filename": mask_filename,
+        "mask_blur": mask_blur,
+    }
+    meta_path = result_path.with_suffix(".json")
+    meta_path.write_text(json.dumps(meta, indent=2))
+
+    return {
+        "image_url": f"/images/{result_filename}",
+        "init_image_url": f"/images/{init_filename}",
+        "mask_url": f"/images/{mask_filename}",
+    }
+
+
 def get_image_path(filename: str) -> Path | None:
     """Return the filesystem path for a filename, or None if missing."""
     p = _ensure_output_dir() / filename

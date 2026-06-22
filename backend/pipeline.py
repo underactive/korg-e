@@ -310,6 +310,144 @@ class PipelineWrapper:
         image.save(buf, format="PNG")
         return buf.getvalue()
 
+    # ── inpainting support ────────────────────────────────────────────
+
+    def load_inpaint(
+        self, progress_callback: Callable[[str], None] | None = None
+    ) -> None:
+        """Lazy-load the :class:`ZImageInpaintPipeline`.
+
+        Uses the same weight-cache as the text-to-image pipeline but
+        must be instantiated from its own class.
+        """
+        if hasattr(self, "_inpaint_pipeline") and self._inpaint_pipeline is not None:
+            return
+
+        from diffusers import ZImageInpaintPipeline  # type: ignore[import-untyped]
+
+        _notify(progress_callback, "downloading")
+        dtype = _resolve_dtype()
+        pipe = ZImageInpaintPipeline.from_pretrained(
+            settings.model_id,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=settings.low_cpu_mem_usage,
+        )
+
+        _notify(progress_callback, "loading")
+        pipe.to(settings.device)
+
+        _notify(progress_callback, "optimising")
+        if settings.enable_attention_slicing:
+            try:
+                pipe.enable_attention_slicing()
+            except AttributeError:
+                logger.info("enable_attention_slicing() not available for inpaint pipeline — skipping")
+        if settings.enable_vae_slicing:
+            try:
+                pipe.enable_vae_slicing()
+            except AttributeError:
+                logger.info("enable_vae_slicing() not available for inpaint pipeline — skipping")
+
+        self._inpaint_pipeline = pipe  # type: ignore[attr-defined]
+
+    def generate_inpaint(
+        self,
+        prompt: str,
+        init_image_bytes: bytes,
+        mask_image_bytes: bytes,
+        *,
+        strength: float = 0.6,
+        mask_blur: int = 16,
+        steps: int = 50,
+        cfg_scale: float = 5.0,
+        seed: int | None = None,
+        step_callback: Callable[[int, int, str | None], None] | None = None,
+    ) -> bytes:
+        """Run inpainting and return raw PNG bytes.
+
+        The ``step_callback`` receives ``(step, total_steps, image_b64)``
+        after each inference step. ``image_b64`` is ``None`` when no
+        preview is available for this step.
+        """
+        if not hasattr(self, "_inpaint_pipeline") or self._inpaint_pipeline is None:
+            raise RuntimeError("Inpaint pipeline not loaded. Call load_inpaint() first.")
+
+        from PIL import Image as PILImage
+        from PIL import ImageFilter as PILImageFilter
+        import io
+        import base64
+
+        init_image = PILImage.open(io.BytesIO(init_image_bytes)).convert("RGB")
+        mask_image = PILImage.open(io.BytesIO(mask_image_bytes)).convert("L")
+
+        # Apply Gaussian blur to mask edge for smoother blending
+        if mask_blur > 0:
+            mask_image = mask_image.filter(PILImageFilter.GaussianBlur(radius=mask_blur))
+
+        generator = None
+        if seed is not None:
+            generator = torch.Generator(device=settings.device).manual_seed(seed)
+
+        total = steps
+        decode_interval = settings.preview_decode_interval
+        preview_size = settings.preview_size
+
+        def _on_step(pipe: object, step: int, timestep: int, callback_kwargs: dict) -> dict:
+            image_b64: str | None = None
+
+            if step_callback and decode_interval > 0:
+                should_decode = (step == 0) or ((step + 1) % decode_interval == 0)
+                if should_decode:
+                    try:
+                        latents = callback_kwargs["latents"]
+
+                        with torch.no_grad():
+                            latents_for_vae = latents.to(pipe.vae.dtype)
+                            latents_for_vae = (
+                                latents_for_vae / pipe.vae.config.scaling_factor
+                            ) + pipe.vae.config.shift_factor
+
+                            image_tensor = pipe.vae.decode(latents_for_vae, return_dict=False)[0]
+
+                            pil_images = pipe.image_processor.postprocess(
+                                image_tensor, output_type="pil"
+                            )
+                            preview_image = pil_images[0]
+
+                            if preview_size:
+                                preview_image = preview_image.resize(
+                                    (preview_size, preview_size), PILImage.LANCZOS
+                                )
+
+                            buf = io.BytesIO()
+                            preview_image.save(buf, format="JPEG", quality=60)
+                            image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                    except Exception:
+                        logger.warning("Intermediate VAE decode failed", exc_info=True)
+                        image_b64 = None
+
+            if step_callback:
+                step_callback(step, total, image_b64)
+            return callback_kwargs
+
+        result = self._inpaint_pipeline(
+            prompt=prompt,
+            image=init_image,
+            mask_image=mask_image,
+            strength=strength,
+            num_inference_steps=steps,
+            guidance_scale=cfg_scale,
+            generator=generator,
+            output_type="pil",
+            callback_on_step_end=_on_step,
+            callback_on_step_end_tensor_inputs=["latents"],
+        )
+
+        image = result.images[0]
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        return buf.getvalue()
+
     # ── composite generation ────────────────────────────────────────────
 
     def generate_composite(

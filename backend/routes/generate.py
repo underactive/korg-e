@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend.pipeline import PipelineWrapper
-from backend.utils.storage import save_composite_images, save_image
+from backend.utils.storage import save_composite_images, save_image, save_inpaint_images
 from backend.utils.validation import extract_parameters, validate_workflow
 
 logger = logging.getLogger(__name__)
@@ -30,6 +30,7 @@ class GenerateRequest(BaseModel):
     edges: list[dict] = []
     is_img2img: bool = False
     is_composite: bool = False
+    is_inpaint: bool = False
     canvas_width: int | None = None
     canvas_height: int | None = None
     batch_count: int = 1
@@ -85,6 +86,47 @@ async def generate(request: Request, body: GenerateRequest):
             progress_queue,
             cancel_event,
             loop,
+        )
+    elif body.is_inpaint or params.get("mode") == "inpaint":
+        prompt = params.get("prompt", "")
+        steps = params.get("steps", 50)
+        cfg_scale = params.get("cfg_scale", 5.0)
+        strength = params.get("strength", 0.6)
+        seed = params.get("seed", None)
+        init_image_b64 = params.get("init_image")
+        mask_image_b64 = params.get("mask_image")
+        mask_blur = params.get("mask_blur", 16)
+        if not init_image_b64:
+            return StreamingResponse(
+                _error_stream(["Inpainting requires an uploaded image."]),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        if not mask_image_b64:
+            return StreamingResponse(
+                _error_stream(["Inpainting requires a mask image."]),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        batch_count = max(1, body.batch_count)
+
+        loop.run_in_executor(
+            _executor,
+            _run_inpaint,
+            pipeline,
+            prompt,
+            init_image_b64,
+            mask_image_b64,
+            mask_blur,
+            strength,
+            steps,
+            cfg_scale,
+            seed,
+            progress_queue,
+            cancel_event,
+            loop,
+            batch_count,
         )
     elif body.is_img2img:
         prompt = params.get("prompt", "")
@@ -362,6 +404,125 @@ def _run_img2img(
 
         # Release cached GPU memory before the next image so it can't
         # accumulate across the batch (slowdown + numerical degradation).
+        del png_bytes
+        pipeline.empty_cache()
+
+
+def _run_inpaint(
+    pipeline: PipelineWrapper,
+    prompt: str,
+    init_image_b64: str,
+    mask_image_b64: str,
+    mask_blur: int,
+    strength: float,
+    steps: int,
+    cfg_scale: float,
+    seed: int | None,
+    queue: asyncio.Queue,
+    cancel_event: asyncio.Event,
+    loop: asyncio.AbstractEventLoop,
+    batch_count: int = 1,
+) -> None:
+    """Run inpainting in a thread pool, pushing progress to the async queue."""
+    def _push(data: dict) -> None:
+        asyncio.run_coroutine_threadsafe(queue.put(data), loop)
+
+    # Phase 1: ensure pipelines loaded (once for entire batch)
+    if not pipeline.loaded:
+        _push({"event": "progress", "status": "loading", "phase": "downloading"})
+        pipeline.load(progress_callback=lambda p: _push({
+            "event": "progress", "status": "loading", "phase": p,
+        }))
+
+    _push({"event": "progress", "status": "loading", "phase": "loading_inpaint"})
+    pipeline.load_inpaint()
+
+    import base64
+    from PIL import Image as PILImage
+    import io
+    # Strip data URL prefix if present
+    clean_init_b64 = init_image_b64
+    if "," in clean_init_b64:
+        clean_init_b64 = clean_init_b64.split(",", 1)[1]
+    init_bytes = base64.b64decode(clean_init_b64)
+
+    clean_mask_b64 = mask_image_b64
+    if "," in clean_mask_b64:
+        clean_mask_b64 = clean_mask_b64.split(",", 1)[1]
+    mask_bytes = base64.b64decode(clean_mask_b64)
+
+    # Validate dimensions match
+    init_img = PILImage.open(io.BytesIO(init_bytes))
+    mask_img = PILImage.open(io.BytesIO(mask_bytes))
+    if init_img.size != mask_img.size:
+        _push({
+            "event": "error", "status": "error",
+            "message": f"Mask dimensions {mask_img.size} do not match init image dimensions {init_img.size}.",
+        })
+        return
+    del init_img, mask_img
+
+    # Phase 2: generation loop
+    for batch_idx in range(batch_count):
+        if cancel_event.is_set():
+            break
+
+        _push({
+            "event": "progress", "status": "generating",
+            "step": 0, "total": steps,
+            "batchIndex": batch_idx, "batchTotal": batch_count,
+        })
+
+        def step_cb(
+            current: int, total: int, image_b64: str | None = None,
+            _batch_idx: int = batch_idx,
+        ) -> None:
+            if cancel_event.is_set():
+                return
+            payload: dict = {
+                "event": "progress", "status": "generating",
+                "step": current + 1, "total": total,
+                "batchIndex": _batch_idx, "batchTotal": batch_count,
+            }
+            if image_b64 is not None:
+                payload["image_b64"] = image_b64
+            asyncio.run_coroutine_threadsafe(queue.put(payload), loop)
+
+        per_seed = seed + batch_idx if seed is not None else None
+
+        try:
+            png_bytes = pipeline.generate_inpaint(
+                prompt=prompt,
+                init_image_bytes=init_bytes,
+                mask_image_bytes=mask_bytes,
+                strength=strength,
+                mask_blur=mask_blur,
+                steps=steps,
+                cfg_scale=cfg_scale,
+                seed=per_seed,
+                step_callback=step_cb,
+            )
+        except Exception as exc:
+            logger.exception("Inpaint generation failed")
+            _push({"event": "error", "status": "error", "message": str(exc)})
+            return
+
+        # Phase 3: persist
+        _push({"event": "progress", "status": "saving"})
+        actual_seed = per_seed if per_seed is not None else 0
+        result = save_inpaint_images(
+            png_bytes, init_bytes, mask_bytes,
+            prompt=prompt, seed=actual_seed, mask_blur=mask_blur,
+        )
+
+        _push({
+            "event": "done", "status": "complete",
+            "image_url": result["image_url"], "seed": actual_seed,
+            "batchIndex": batch_idx, "batchTotal": batch_count,
+            "batchComplete": batch_idx == batch_count - 1,
+        })
+
+        # Release cached GPU memory before the next image
         del png_bytes
         pipeline.empty_cache()
 

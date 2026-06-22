@@ -148,6 +148,14 @@ def extract_parameters(
             if source_node and source_node.get("type") == "imageUpload":
                 params["init_image"] = source_node.get("data", {}).get("imageData", None)
 
+    # Check for inpainting (maskData present on generate node + init_image)
+    gen_data = generate_node.get("data", {})
+    mask_data = gen_data.get("maskData")
+    if mask_data and params.get("init_image"):
+        params["mode"] = "inpaint"
+        params["mask_image"] = mask_data
+        params["mask_blur"] = gen_data.get("maskBlur", 16)
+
     return params
 
 

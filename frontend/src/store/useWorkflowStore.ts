@@ -48,6 +48,7 @@ function createNode(type: KorgNodeType, position: { x: number; y: number }): Kor
       width: 1024,
       height: 1024,
       batchCount: 1,
+      maskBlur: 16,
       status: "idle",
       inputs: [
         { name: "prompt", type: "prompt", required: true },

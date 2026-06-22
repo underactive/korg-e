@@ -47,6 +47,11 @@ export type KorgNodeData = {
   // CompositionNode
   canvasWidth?: number;
   canvasHeight?: number;
+  // Inpainting (extends zImageGenerate)
+  maskData?: string | null;       // base64 PNG of brush mask
+  maskBlur?: number;              // Gaussian blur radius for mask edge (default 16)
+  imageWidth?: number;            // natural width of uploaded init image
+  imageHeight?: number;           // natural height of uploaded init image
 };
 
 export type KorgNodeType =

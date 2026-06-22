@@ -14,6 +14,7 @@ import {
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { useWorkflowStore } from "@/store/useWorkflowStore";
 import { useUIStore } from "@/store/useUIStore";
+import { usePaintStore } from "@/store/usePaintStore";
 import { useWorkflowIntegration } from "@/utils/integration";
 import TextPromptNode from "@/components/nodes/TextPromptNode";
 import ImageUploadNode from "@/components/nodes/ImageUploadNode";
@@ -36,6 +37,7 @@ export default function FlowCanvas() {
     useWorkflowStore();
   const { drawMode, drawingNodeId, setDrawMode, setDrawingRect, resetDrawing } =
     useUIStore();
+  const { paintMode } = usePaintStore();
   const reactFlowInstance = useReactFlow();
 
   // Wire up CustomEvent integration
@@ -222,7 +224,7 @@ export default function FlowCanvas() {
         width: "100vw",
         height: "100vh",
         position: "relative",
-        cursor: drawMode ? "crosshair" : undefined,
+        cursor: (drawMode || paintMode) ? "crosshair" : undefined,
       }}
     >
       <ReactFlow
@@ -233,8 +235,8 @@ export default function FlowCanvas() {
         onConnect={onConnect}
         nodeTypes={nodeTypes}
         defaultEdgeOptions={defaultEdgeOptions}
-        panOnDrag={!drawMode}
-        nodesDraggable={!drawMode}
+        panOnDrag={!drawMode && !paintMode}
+        nodesDraggable={!drawMode && !paintMode}
         onPaneClick={handlePaneClick}
         onPaneMouseMove={handlePaneMouseMove}
         fitView

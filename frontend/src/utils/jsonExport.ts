@@ -26,6 +26,7 @@ const NODE_DATA_DEFAULTS: Record<KorgNodeType, Partial<KorgNodeData>> = {
     seed: null,
     width: 1024,
     height: 1024,
+    maskBlur: 16,
     status: "idle",
     inputs: [
       { name: "prompt", type: "prompt", required: true },

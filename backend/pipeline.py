@@ -22,6 +22,8 @@ class PipelineWrapper:
 
     def __init__(self) -> None:
         self._pipeline: _PipelineType = None  # type: ignore[assignment]
+        self._img2img_pipeline: _PipelineType = None  # type: ignore[assignment]
+        self._inpaint_pipeline: _PipelineType = None  # type: ignore[assignment]
         self._loaded = False
 
     @property
@@ -60,7 +62,12 @@ class PipelineWrapper:
         )
 
         _notify(progress_callback, "loading")
-        pipe.to(settings.device)  # "mps" or "cuda"
+        if settings.cpu_offload:
+            # Mutually exclusive with .to() — moving the pipeline afterwards
+            # would pin every module to the accelerator and undo the offload.
+            pipe.enable_model_cpu_offload(device=settings.device)
+        else:
+            pipe.to(settings.device)
 
         _notify(progress_callback, "optimising")
         if settings.enable_attention_slicing:
@@ -81,40 +88,21 @@ class PipelineWrapper:
     # ── image-to-image support ──────────────────────────────────────────
 
     def load_img2img(self, progress_callback: Callable[[str], None] | None = None) -> None:
-        """Lazy-load the **separate** :class:`ZImageImg2ImgPipeline`.
-
-        Uses the same weight-cache as the text-to-image pipeline but
-        must be instantiated from its own class.
-        """
-        if hasattr(self, "_img2img_pipeline") and self._img2img_pipeline is not None:
+        """Lazy-load the :class:`ZImageImg2ImgPipeline` over shared components."""
+        if self._img2img_pipeline is not None:
             return
+
+        if self._pipeline is None:
+            raise RuntimeError("Pipeline not loaded. Call load() first.")
 
         from diffusers import ZImageImg2ImgPipeline  # type: ignore[import-untyped]
 
-        _notify(progress_callback, "downloading")
-        dtype = _resolve_dtype()
-        pipe = ZImageImg2ImgPipeline.from_pretrained(
-            settings.model_id,
-            torch_dtype=dtype,
-            low_cpu_mem_usage=settings.low_cpu_mem_usage,
-        )
-
         _notify(progress_callback, "loading")
-        pipe.to(settings.device)
-
-        _notify(progress_callback, "optimising")
-        if settings.enable_attention_slicing:
-            try:
-                pipe.enable_attention_slicing()
-            except AttributeError:
-                logger.info("enable_attention_slicing() not available for img2img pipeline — skipping")
-        if settings.enable_vae_slicing:
-            try:
-                pipe.enable_vae_slicing()
-            except AttributeError:
-                logger.info("enable_vae_slicing() not available for img2img pipeline — skipping")
-
-        self._img2img_pipeline = pipe  # type: ignore[attr-defined]
+        # from_pipe rebinds the modules already held by the text-to-image
+        # pipeline, so this costs no extra memory and the slicing and offload
+        # hooks installed by load() stay in force. Re-running those here would
+        # double-hook the shared modules.
+        self._img2img_pipeline = ZImageImg2ImgPipeline.from_pipe(self._pipeline)
 
     # ── generation ──────────────────────────────────────────────────────
 
@@ -231,7 +219,7 @@ class PipelineWrapper:
         after each inference step. ``image_b64`` is ``None`` when no
         preview is available for this step.
         """
-        if not hasattr(self, "_img2img_pipeline") or self._img2img_pipeline is None:
+        if self._img2img_pipeline is None:
             raise RuntimeError("Img2Img pipeline not loaded. Call load_img2img() first.")
 
         from PIL import Image as PILImage
@@ -315,40 +303,17 @@ class PipelineWrapper:
     def load_inpaint(
         self, progress_callback: Callable[[str], None] | None = None
     ) -> None:
-        """Lazy-load the :class:`ZImageInpaintPipeline`.
-
-        Uses the same weight-cache as the text-to-image pipeline but
-        must be instantiated from its own class.
-        """
-        if hasattr(self, "_inpaint_pipeline") and self._inpaint_pipeline is not None:
+        """Lazy-load the :class:`ZImageInpaintPipeline` over shared components."""
+        if self._inpaint_pipeline is not None:
             return
+
+        if self._pipeline is None:
+            raise RuntimeError("Pipeline not loaded. Call load() first.")
 
         from diffusers import ZImageInpaintPipeline  # type: ignore[import-untyped]
 
-        _notify(progress_callback, "downloading")
-        dtype = _resolve_dtype()
-        pipe = ZImageInpaintPipeline.from_pretrained(
-            settings.model_id,
-            torch_dtype=dtype,
-            low_cpu_mem_usage=settings.low_cpu_mem_usage,
-        )
-
         _notify(progress_callback, "loading")
-        pipe.to(settings.device)
-
-        _notify(progress_callback, "optimising")
-        if settings.enable_attention_slicing:
-            try:
-                pipe.enable_attention_slicing()
-            except AttributeError:
-                logger.info("enable_attention_slicing() not available for inpaint pipeline — skipping")
-        if settings.enable_vae_slicing:
-            try:
-                pipe.enable_vae_slicing()
-            except AttributeError:
-                logger.info("enable_vae_slicing() not available for inpaint pipeline — skipping")
-
-        self._inpaint_pipeline = pipe  # type: ignore[attr-defined]
+        self._inpaint_pipeline = ZImageInpaintPipeline.from_pipe(self._pipeline)
 
     def generate_inpaint(
         self,
@@ -369,7 +334,7 @@ class PipelineWrapper:
         after each inference step. ``image_b64`` is ``None`` when no
         preview is available for this step.
         """
-        if not hasattr(self, "_inpaint_pipeline") or self._inpaint_pipeline is None:
+        if self._inpaint_pipeline is None:
             raise RuntimeError("Inpaint pipeline not loaded. Call load_inpaint() first.")
 
         from PIL import Image as PILImage

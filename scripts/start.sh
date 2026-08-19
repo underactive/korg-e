@@ -13,6 +13,7 @@ if [[ -f "$REPO_ROOT/.env" ]]; then
 fi
 
 KORG_E_HOME="${KORG_E_HOME:-$HOME/.korg-e}"
+KORG_E_HOST="${KORG_E_HOST:-127.0.0.1}"
 KORG_E_PORT="${KORG_E_PORT:-8000}"
 KORG_E_LOG_LEVEL="${KORG_E_LOG_LEVEL:-info}"
 
@@ -26,13 +27,23 @@ fi
 source "$VENV_DIR/bin/activate"
 
 # ── 2. Start backend ───────────────────────────────────────────────────
-echo "◆ Starting korg-e backend on http://127.0.0.1:$KORG_E_PORT …"
+echo "◆ Starting korg-e backend on http://$KORG_E_HOST:$KORG_E_PORT …"
 cd "$REPO_ROOT"
-uvicorn backend.main:app \
-    --host 127.0.0.1 \
-    --port "$KORG_E_PORT" \
-    --log-level "$KORG_E_LOG_LEVEL" \
-    --reload &
+
+UVICORN_ARGS=(
+    backend.main:app
+    --host "$KORG_E_HOST"
+    --port "$KORG_E_PORT"
+    --log-level "$KORG_E_LOG_LEVEL"
+)
+
+# --reload watches the source tree, so a stray file touch would evict and
+# reload ~20GB of weights. Restrict it to dev runs.
+if [[ "${1:-}" == "--dev" || "${1:-}" == "-d" ]]; then
+    UVICORN_ARGS+=(--reload)
+fi
+
+uvicorn "${UVICORN_ARGS[@]}" &
 
 BACKEND_PID=$!
 echo "  backend PID: $BACKEND_PID"

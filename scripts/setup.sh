@@ -80,7 +80,15 @@ mkdir -p "$KORG_E_HOME"/{outputs,workflows,cache,venv}
 VENV_DIR="$KORG_E_HOME/venv"
 if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
     echo "◆ Creating Python venv …"
-    "$PYTHON" -m venv "$VENV_DIR"
+    if "$PYTHON" -c "import ensurepip" &>/dev/null; then
+        "$PYTHON" -m venv "$VENV_DIR"
+    else
+        # Debian/Ubuntu ship ensurepip in a separate python3-venv package that
+        # needs root, so fetch pip directly rather than requiring sudo.
+        echo "  ensurepip unavailable — bootstrapping pip"
+        "$PYTHON" -m venv --without-pip "$VENV_DIR"
+        curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$VENV_DIR/bin/python" -
+    fi
 fi
 
 source "$VENV_DIR/bin/activate"

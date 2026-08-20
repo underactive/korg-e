@@ -1,0 +1,17 @@
+[Unit]
+Description=korg-e image generation backend
+After=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=%h/korg-e
+# .env uses shell ${VAR:-default} expansions, so EnvironmentFile= cannot read it
+ExecStart=/bin/bash -c '[ -f .env ] && { set -a; . ./.env; set +a; }; KORG_E_HOME="${KORG_E_HOME:-$HOME/.korg-e}"; exec "$KORG_E_HOME/venv/bin/uvicorn" backend.main:app --host "${KORG_E_HOST:-127.0.0.1}" --port "${KORG_E_PORT:-8000}" --log-level "${KORG_E_LOG_LEVEL:-info}"'
+# At boot this can win the race against the VPN interface and fail to bind a
+# non-loopback KORG_E_HOST; keep retrying until the interface is up.
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=default.target

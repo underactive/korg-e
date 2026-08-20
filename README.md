@@ -70,6 +70,24 @@ The first run takes 5-10 minutes while pip downloads and compiles packages.
 ./scripts/start.sh --dev
 ```
 
+#### Run as a service (Linux)
+
+`start.sh` dies with your terminal. On a headless box, install the user
+systemd unit instead (assumes the repo is cloned at `~/korg-e`; edit
+`WorkingDirectory` in the unit otherwise):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp scripts/korg-e.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now korg-e
+loginctl enable-linger   # start at boot, survive logout
+```
+
+Logs: `journalctl --user -u korg-e -f`. With no dev server running, build
+the UI once (`cd frontend && npm run build`) and the backend serves it at
+`http://$KORG_E_HOST:8000/`.
+
 ### 4. Open the UI
 
 Visit **http://localhost:5173** in your browser. You'll see a pre-placed starter workflow with three connected nodes:
@@ -370,6 +388,7 @@ korg-e/
 │   ├── tsconfig.json
 │   └── vite.config.ts        # Vite config with API proxy to backend
 ├── scripts/
+│   ├── korg-e.service        # User systemd unit for headless deployments
 │   ├── setup.sh              # Environment validation + dependency install
 │   └── start.sh              # Launch backend (+ optional frontend)
 ├── .env.example              # Environment variable template

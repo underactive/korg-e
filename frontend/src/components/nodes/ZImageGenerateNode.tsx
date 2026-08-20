@@ -281,6 +281,9 @@ export default function ZImageGenerateNode({
               <option value={512}>512</option>
               <option value={768}>768</option>
               <option value={1024}>1024</option>
+              <option value={1280}>1280</option>
+              <option value={1536}>1536</option>
+              <option value={2048}>2048</option>
             </select>
           </label>
           <label>
@@ -296,6 +299,9 @@ export default function ZImageGenerateNode({
               <option value={512}>512</option>
               <option value={768}>768</option>
               <option value={1024}>1024</option>
+              <option value={1280}>1280</option>
+              <option value={1536}>1536</option>
+              <option value={2048}>2048</option>
             </select>
           </label>
           {hasMask && (

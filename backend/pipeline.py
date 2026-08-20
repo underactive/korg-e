@@ -102,7 +102,11 @@ class PipelineWrapper:
         # pipeline, so this costs no extra memory and the slicing and offload
         # hooks installed by load() stay in force. Re-running those here would
         # double-hook the shared modules.
-        self._img2img_pipeline = ZImageImg2ImgPipeline.from_pipe(self._pipeline)
+        # torch_dtype is not optional: from_pipe falls back to float32 and casts
+        # the shared modules, which doubles them and blows past 16GB of VRAM.
+        self._img2img_pipeline = ZImageImg2ImgPipeline.from_pipe(
+            self._pipeline, torch_dtype=_resolve_dtype()
+        )
 
     # ── generation ──────────────────────────────────────────────────────
 
@@ -313,7 +317,9 @@ class PipelineWrapper:
         from diffusers import ZImageInpaintPipeline  # type: ignore[import-untyped]
 
         _notify(progress_callback, "loading")
-        self._inpaint_pipeline = ZImageInpaintPipeline.from_pipe(self._pipeline)
+        self._inpaint_pipeline = ZImageInpaintPipeline.from_pipe(
+            self._pipeline, torch_dtype=_resolve_dtype()
+        )
 
     def generate_inpaint(
         self,

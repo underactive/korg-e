@@ -38,3 +38,6 @@ htmlcov/
 
 # Logs
 *.log
+
+# Generated images when KORG_E_OUTPUT_DIR points inside the repo
+output/

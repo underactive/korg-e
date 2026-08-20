@@ -33,7 +33,9 @@ def _env_flag(name: str, default: bool) -> bool:
 class Settings:
     # ── paths ──────────────────────────────────────────────────────────
     data_root: Path = _data_root()
-    output_dir: Path = _ensure_dir(data_root / "outputs")
+    output_dir: Path = _ensure_dir(
+        Path(os.environ.get("KORG_E_OUTPUT_DIR", data_root / "outputs"))
+    )
     workflows_dir: Path = _ensure_dir(data_root / "workflows")
     cache_dir: Path = _ensure_dir(
         Path(os.environ.get("HF_HOME", data_root / "cache"))

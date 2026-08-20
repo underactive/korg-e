@@ -53,7 +53,7 @@ class Settings:
     enable_vae_slicing: bool = True
     device: str = _resolve_device()
     # The weights total ~20GB, which will not fit alongside activations on a
-    # 16GB card, so CUDA keeps one module resident at a time by default.
+    # 16GB card, so CUDA streams them per submodule by default.
     cpu_offload: bool = _env_flag("KORG_E_CPU_OFFLOAD", device == "cuda")
     # Slicing trades throughput for peak memory — worth it on MPS, but on CUDA
     # offload already caps the footprint.
